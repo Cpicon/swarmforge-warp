@@ -1,0 +1,19 @@
+#!/usr/bin/env sh
+#
+# Start SwarmForge with the Warp terminal adapter.
+#
+# Installed at the root of a SwarmForge project by swarmforge-warp's install.sh.
+# Plain `sh`: this only sets one variable and hands off to ./swarm.
+set -eu
+
+cd "$(dirname "$0")"
+
+if [ ! -x ./swarm ]; then
+  echo "swarm-warp: no executable ./swarm here ($(pwd))." >&2
+  echo "swarm-warp: run this from a SwarmForge project root." >&2
+  exit 1
+fi
+
+SWARMFORGE_TERMINAL=warp
+export SWARMFORGE_TERMINAL
+exec ./swarm "$@"
