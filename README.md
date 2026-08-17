@@ -55,14 +55,48 @@ Pick `--branch two-pack` (2 agents), `four-pack` (4) or `six-pack` (6). Pick `--
 
 > Working from a clone instead? `cd /path/to/your/project && /path/to/swarmforge-warp/install.sh --branch six-pack --agent claudio --scaffold-project-prompt`. Identical result; the installer copies the two overlay files locally rather than fetching them.
 
-### 2. Commit before the agents branch from it
+### 2. Commit the config — the agents cannot see it otherwise
 
 ```sh
 git checkout -b chore/swarmforge
 git add -A && git commit -m "chore: install swarmforge-warp"
 ```
 
-Each agent gets a git worktree branched from `HEAD`, so whatever you have committed is the baseline they start from. `git diff .gitignore` should show your own entries intact with a `# SwarmForge` block appended.
+This is not housekeeping. Each role gets a git worktree created with `git worktree add … HEAD`, which checks out **committed files only**. SwarmForge syncs `swarmforge/scripts/` and `.swarmforge/` state into each worktree at launch, but *not* `swarmforge.conf`, `constitution.prompt`, `constitution/articles/` or `roles/`. Leave those uncommitted and every agent starts with no role and no constitution — and nothing reports an error, because the agent is handed a pointer to files that simply are not there.
+
+`git diff .gitignore` should show your own entries intact with a `# SwarmForge` block appended.
+
+#### Keeping it out of a shared repository
+
+If this is a company repo you do not want to push swarm config to, **do not install into your working checkout**. Give the swarm its own clone; then committing affects nobody, and your real checkout is never touched at all:
+
+```sh
+git clone <repo-url> ~/swarms/my-project      # a clone that is yours alone
+cd ~/swarms/my-project
+git checkout -b swarm/base
+
+curl -fsSL https://raw.githubusercontent.com/Cpicon/swarmforge-warp/main/install.sh \
+  | sh -s -- --branch six-pack --agent claudio --scaffold-project-prompt
+git add -A && git commit -m "swarm config (local only, never pushed)"
+
+./swarm-warp
+```
+
+Harvest the work as a patch that excludes the swarm's own files, and apply it in your real checkout:
+
+```sh
+# in the swarm clone, once QA has closed the loop
+git diff swarm/base..swarmforge-specifier -- . \
+  ':(exclude)swarmforge' ':(exclude)swarm' ':(exclude)swarm-warp' > /tmp/feature.patch
+
+cd ~/code/my-project && git checkout -b feat/TICKET-123 && git apply /tmp/feature.patch
+```
+
+The pathspec exclusions are what keep `swarmforge/`, `swarm` and `swarm-warp` from travelling with the work. Your shared repo sees an ordinary feature branch and never learns a swarm was involved.
+
+This also sidesteps a subtler problem: the agents branch from `HEAD`, so anything you commit to make the swarm work becomes an ancestor of every `swarmforge-*` branch. Merging one of those back into a branch you intend to push would carry the swarm config with it.
+
+> Installing into your working checkout and simply not committing does **not** work — see above. Nor does `.gitignore` or `.git/info/exclude`: ignoring a file does not put it in a worktree. The choice is a dedicated clone, or a local branch you are careful never to push.
 
 ### 3. Fill in `project.prompt` — the one step that is genuinely yours
 
