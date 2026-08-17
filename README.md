@@ -85,7 +85,15 @@ That is just `SWARMFORGE_TERMINAL=warp ./swarm "$@"` — all arguments are passe
 SWARMFORGE_TERMINAL=warp ./swarm
 ```
 
-SwarmForge starts the tmux sessions as usual, then the adapter prints something like:
+SwarmForge prints one yellow notice at startup:
+
+```
+Warp surfaces are not trackable; window watchdog is disabled for this backend.
+```
+
+That is expected, and it is SwarmForge's own message rather than the adapter's. It is acknowledging `terminal_backend_tracks_windows` = false — see [Limitations](#limitations). Nothing is wrong.
+
+It then starts the tmux sessions as usual, and the adapter prints something like:
 
 ```
   SwarmForge → Warp
@@ -198,7 +206,23 @@ Then **sidebar `+` → "SwarmForge ml-platform"**. Six panes in one tab, in `ses
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Each pane is one agent, attached to its own tmux session, working in its own git worktree under `.worktrees/<role>` on a branch called `swarmforge-<role>`. `specifier` is the exception: it runs in your main checkout, on your current branch.
+Each pane is one agent, attached to its own tmux session, working in its own git worktree under `.worktrees/<role>` on a branch called `swarmforge-<role>`.
+
+> **Give the first role a worktree too** — do this before you launch. The packs ship `window specifier claude master`, and `master` is one of the two names (`none` is the other) that SwarmForge maps to **your main checkout** instead of to `.worktrees/`. That means the swarm and you share one working tree, which has bitten us twice:
+>
+> - **Switching branches in the project root silently lobotomises that agent.** Its system prompt is only a pointer — *"read `swarmforge/constitution.prompt`, then every file it refers to"* — so a checkout that removes those tracked files leaves it with no role, no constitution and no handoff protocol, and **nothing reports an error**. The other five, being in real worktrees, are unaffected.
+> - **You cannot work while the swarm works**, which defeats the point of running one.
+>
+> Any worktree name other than `none` or `master` gets a real worktree, so the fix is one word in `swarmforge/swarmforge.conf`:
+>
+> ```diff
+> -window specifier claude master
+> +window specifier claude specifier
+> ```
+>
+> Completed work then arrives as a `swarmforge-specifier` branch you merge when convenient, rather than as commits appearing under whatever you happen to have checked out.
+>
+> Keep the swarm's `swarmforge/` config on the branch you launch from — after launch each agent reads its own worktree's copy, so you are free to switch branches in the root while it runs.
 
 ### 5. Give the swarm its first feature
 
