@@ -25,26 +25,79 @@ This is an **overlay repo**: it changes nothing upstream. SwarmForge is a pinned
 | git | SwarmForge gives each agent its own worktree | `brew install git` |
 | tmux | every agent runs inside a tmux session | `brew install tmux` |
 | babashka (`bb`) | SwarmForge itself is a babashka script | `brew install borkdude/brew/babashka` |
-| an agent CLI | `codex`, `claude` or `gemini` — whichever `swarmforge/swarmforge.conf` names | per vendor |
+| an agent CLI | `claude`, `codex`, `copilot` or `grok` — SwarmForge validates this field against exactly that list | per vendor |
 
 `python3` (3.11+) is needed only to run the test suite.
 
-## Install
+## Set up in any repository
 
-From inside the project directory you want the swarm to work on:
+Five steps, start to finish. **No clone of this repo is required** — the installer runs straight from GitHub and fetches what it needs, so this works the same on a machine you never want to check anything out on.
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/Cpicon/swarmforge-warp/main/install.sh | sh -s -- --branch four-pack
-```
+### 1. Install and configure, in one command
 
-Or from a clone of this repo:
+From inside the project you want the swarm to work on:
 
 ```sh
-cd /path/to/your/project
-/path/to/swarmforge-warp/install.sh --branch four-pack
+curl -fsSL https://raw.githubusercontent.com/Cpicon/swarmforge-warp/main/install.sh \
+  | sh -s -- --branch six-pack --agent claudio --scaffold-project-prompt
 ```
 
-The installer is idempotent — re-run it to upgrade.
+```
+Downloading SwarmForge six-pack ...
+  installed ./swarm and swarmforge/ from six-pack
+  merged the pack's ignore rules into your .gitignore
+  configured swarmforge.conf for claude
+  made 3 shared constitution article(s) reachable
+  scaffolded swarmforge/constitution/articles/project.prompt (edit the TODOs)
+```
+
+Pick `--branch two-pack` (2 agents), `four-pack` (4) or `six-pack` (6). Pick `--agent` from `claude`, `codex`, `copilot`, `grok`, or `claudio` for claude with permission checks bypassed; omit it and the first one found on `PATH` is used. The installer is idempotent — re-run it to upgrade.
+
+> Working from a clone instead? `cd /path/to/your/project && /path/to/swarmforge-warp/install.sh --branch six-pack --agent claudio --scaffold-project-prompt`. Identical result; the installer copies the two overlay files locally rather than fetching them.
+
+### 2. Commit before the agents branch from it
+
+```sh
+git checkout -b chore/swarmforge
+git add -A && git commit -m "chore: install swarmforge-warp"
+```
+
+Each agent gets a git worktree branched from `HEAD`, so whatever you have committed is the baseline they start from. `git diff .gitignore` should show your own entries intact with a `# SwarmForge` block appended.
+
+### 3. Fill in `project.prompt` — the one step that is genuinely yours
+
+`swarmforge/constitution/articles/project.prompt` tells **every** agent what your project is. `--scaffold-project-prompt` left it with detected languages filled in and the rest as `TODO`s. The fastest way to finish it is to hand the job to a plain Claude Code session in that repo:
+
+> Read `swarmforge/constitution/articles/project.prompt`. It is a constitution that six autonomous coding agents will read as fact before working in this repository, and it currently contains TODOs.
+>
+> Investigate this repository and rewrite the file so every TODO is resolved. Determine and state:
+>
+> 1. **Languages and runtimes** actually used here, with versions where they are pinned. Delete any language the scaffold guessed that is incidental.
+> 2. **The dependency and environment tooling** — how dependencies are installed and how a command is run inside the project environment. Give the literal commands.
+> 3. **The test command and the lint/format command**, exactly as they must be typed, per package if the repo has more than one. State that a change is not done until both pass.
+> 4. **Repository layout** — where source, tests, infrastructure and scripts live, and where new code of each kind belongs. Agents work in separate git worktrees and cannot ask each other, so be concrete.
+> 5. **Guardrails** — anything an agent must never run. Include anything that mutates cloud infrastructure, costs money, touches production, deploys, publishes, or needs credentials the agents will not have. Also list anything that requires hardware they lack, such as a GPU. Say explicitly that if a task appears to require one of these, the agent must stop and ask.
+> 6. **Conventions** worth stating — commit message format, branch naming, and any house rules a newcomer would get wrong.
+>
+> Base every statement on evidence in the repository: config files, CI workflows, existing tests, contributor docs. Do not guess. If you cannot determine something, leave a clearly marked TODO rather than inventing an answer — a confidently wrong constitution is worse than an obviously incomplete one. Keep the existing section headings, and keep the `## Local Configuration` and `## Ownership` sections unchanged.
+
+Read the result before you launch. This file is the highest-leverage text in the whole setup: the packs ship one claiming the project language is Babashka, and every agent believes it.
+
+### 4. Dry run
+
+```sh
+bb swarmforge/scripts/swarmforge.bb --test-parse "$(pwd)"
+```
+
+Prints one line per role. This writes `.swarmforge/` state but creates no worktrees, no branches, no tmux sessions and no agents — nothing is spent. If the conf is malformed or a role prompt is missing, it fails here instead of six panes in.
+
+### 5. Launch
+
+```sh
+./swarm-warp
+```
+
+Then **sidebar `+` → "SwarmForge \<project\>"**. See [A worked example](#a-worked-example) for what to type once the panes are up.
 
 ### Options
 
@@ -148,50 +201,34 @@ Closing the panes does **not** stop the agents; they run `exec tmux attach-sessi
 
 Putting a six-agent swarm on an existing repo — `~/code/ml-platform`, a real project with its own history, CI and `.gitignore` — using `claude` as the agent CLI.
 
-### 1. Install
+### 1. Set up
 
-Always from inside the target project, on a branch, since the installer adds tracked files to the repo root:
+Follow [Set up in any repository](#set-up-in-any-repository) — install and configure, commit, fill in `project.prompt`. For this example:
 
 ```sh
-cd ~/code/ml-platform
-git checkout -b chore/swarmforge-warp
-~/code/swarmforge-warp/install.sh --branch six-pack
+cd ~/code/ml-platform && git checkout -b chore/swarmforge-warp
+curl -fsSL https://raw.githubusercontent.com/Cpicon/swarmforge-warp/main/install.sh \
+  | sh -s -- --branch six-pack --agent claudio --scaffold-project-prompt
 ```
 
-```
-Downloading SwarmForge six-pack ...
-  installed ./swarm and swarmforge/ from six-pack
-  merged the pack's ignore rules into your .gitignore
-Downloading SwarmForge scripts (main) ...
-  installed swarmforge/scripts
-
-swarmforge-warp installed in /Users/you/code/ml-platform
-```
-
-The packs ship their own `.gitignore`. On a project that already has one, the installer keeps yours and appends only the entries it lacks, under a `# SwarmForge (added by swarmforge-warp)` header. `git diff .gitignore` should show your own entries untouched and the new block appended at the end.
-
-> If your `.gitignore` did not end in a newline, git also reports one deletion — the old last line, re-added with a newline. That is expected and harmless; look for `\ No newline at end of file` in the diff.
-
-### 2. Point the roles at your agent CLI
-
-The packs ship configured for `codex`. If you use something else, edit `swarmforge/swarmforge.conf`:
+The resulting `swarmforge/swarmforge.conf`:
 
 ```
 # Format: window <role> <agent> <worktree> [task|batch] [extra-cli-args...]
-window specifier claude master   --permission-mode bypassPermissions
-window coder     claude coder    --permission-mode bypassPermissions
-window cleaner   claude cleaner  batch --permission-mode bypassPermissions
+window specifier claude specifier --permission-mode bypassPermissions
+window coder     claude coder     --permission-mode bypassPermissions
+window cleaner   claude cleaner   batch --permission-mode bypassPermissions
 window architect claude architect batch --permission-mode bypassPermissions
 window hardender claude hardender batch --permission-mode bypassPermissions
-window QA        claude QA       batch --permission-mode bypassPermissions
+window QA        claude QA        batch --permission-mode bypassPermissions
 ```
 
-Two things that are easy to get wrong here:
+Two things worth understanding about that file, because they explain why `--configure` exists:
 
-- **The agent field is an allowlist, not a command.** `swarmforge.bb` accepts only `claude`, `codex`, `copilot` or `grok`, and builds a fixed command template per name. A shell alias — `claudio`, say — is rejected at config-parse time with `Unsupported agent`, even though the command is ultimately delivered by tmux `send-keys` into an interactive shell where the alias *would* have expanded.
-- **Everything after the receive mode is passed through to the CLI.** That is the supported way to get alias-like behaviour. SwarmForge already launches Claude with `--permission-mode acceptEdits`; a trailing `--permission-mode bypassPermissions` is appended after it and wins, which is the same unattended posture as `claude --dangerously-skip-permissions`. Leave it off to keep `acceptEdits`, which still lets agents edit files but prompts for other tools.
+- **The agent field is an allowlist, not a command.** `swarmforge.bb` accepts only `claude`, `codex`, `copilot` or `grok`, and builds a fixed command template per name. A shell alias — `claudio`, say — is rejected at config-parse time with `Unsupported agent`, even though the command is ultimately delivered by tmux `send-keys` into an interactive shell where the alias *would* have expanded. `--agent claudio` translates it for you.
+- **Everything after the receive mode is passed through to the CLI.** That is the supported way to get alias-like behaviour. SwarmForge already launches Claude with `--permission-mode acceptEdits`; a trailing `--permission-mode bypassPermissions` is appended after it and wins, which is the same unattended posture as `claude --dangerously-skip-permissions`. Use `--agent claude` instead of `claudio` to keep `acceptEdits`, which still lets agents edit files but prompts for other tools.
 
-### 3. Dry-run before spending anything
+### 2. Dry-run before spending anything
 
 `swarmforge.bb` has test hooks that stop short of starting agents. They create `.swarmforge/` state files, an empty `.worktrees/`, and the tab config — but no git worktrees, no branches, no tmux sessions and no agent processes, so this is a genuine dry run:
 
@@ -218,7 +255,7 @@ bb swarmforge/scripts/swarmforge.bb --test-terminal-bridge "$(pwd)" warp
 
 `warp-tab-config` on stdout means the adapter ran and wrote `~/.warp/tab_configs/swarmforge_ml_platform.toml`. Open it from Warp's sidebar now if you want to see the layout before any agent starts — the panes will just fail to attach, since the tmux sessions do not exist yet.
 
-### 4. Run it
+### 3. Run it
 
 ```sh
 ./swarm-warp
@@ -251,7 +288,7 @@ Each pane is one agent, attached to its own tmux session, working in its own git
 >
 > Keep the swarm's `swarmforge/` config on the branch you launch from — after launch each agent reads its own worktree's copy, so you are free to switch branches in the root while it runs.
 
-### 5. Give the swarm its first feature
+### 4. Give the swarm its first feature
 
 **You talk to `specifier`. That is the whole interface.** Click that pane and type what you want, exactly as you would prompt a single agent:
 
@@ -270,7 +307,7 @@ What happens next, in order:
 
 So one full cycle is: *prompt the specifier → answer its questions → approve once → watch → answer "what next?"*.
 
-### 6. What the other five panes are doing
+### 5. What the other five panes are doing
 
 Work moves down a fixed pipeline, each agent handing the next one a **commit**, not a diff or a chat message:
 
@@ -313,7 +350,7 @@ If you are coming from single-agent Claude Code, the differences that matter:
 | You approve tool calls as they come | One human gate: spec → coder. After that it runs unattended |
 | `Ctrl-C` stops it | See below — closing panes does not stop anything |
 
-### 7. Stopping it, and recovering a closed pane
+### 6. Stopping it, and recovering a closed pane
 
 **Closing a Warp pane does not stop that agent.** The pane runs `exec tmux attach-session`, so closing it only detaches; the tmux session and the agent keep running. Upstream's docs say closing the first window shuts the swarm down and that a watchdog reopens the others — neither applies here, because this adapter reports `terminal_backend_tracks_windows` = false and SwarmForge therefore skips the watchdog, which is what implements both behaviours.
 
@@ -425,7 +462,7 @@ Set `SWARMFORGE_WARP_TAB_CONFIG_DIR` to write somewhere other than `~/.warp/tab_
 ## Limitations
 
 - **Opening the tab takes one click.** There is no supported way to make Warp open a tab config from a script; the sidebar `+` menu is the entry point. (Warp documents a `warp://tab_config/<name>` URI, but URI-scheme automation was found not to work in current Warp Stable during this integration's testing, so nothing here depends on it.)
-- **No window watchdog.** SwarmForge normally polls whether an agent's window was closed and reopens it. Warp has no pane query API, so that feature is off. Closing a pane tells SwarmForge nothing, nothing reopens it, and the agent keeps running detached — re-attach from the project root with `exec tmux -S "$(cat .swarmforge/tmux-socket)" attach-session -t swarmforge-<role>`. Shutdown is unaffected: it hangs off the first role's launch command, not off any window. See [Stopping it](#7-stopping-it-and-recovering-a-closed-pane).
+- **No window watchdog.** SwarmForge normally polls whether an agent's window was closed and reopens it. Warp has no pane query API, so that feature is off. Closing a pane tells SwarmForge nothing, nothing reopens it, and the agent keeps running detached — re-attach from the project root with `exec tmux -S "$(cat .swarmforge/tmux-socket)" attach-session -t swarmforge-<role>`. Shutdown is unaffected: it hangs off the first role's launch command, not off any window. See [Stopping it](#6-stopping-it-and-recovering-a-closed-pane).
 - **No AppleScript.** Warp ships no AppleScript dictionary, so the `osascript` tricks the iTerm2/Ghostty/Terminal.app adapters use are unavailable.
 - **macOS only**, and only tested against Warp Stable.
 - **A tab config per project directory.** The filename is derived from the project's basename (lowercased, non-alphanumerics → `_`), so two projects whose basenames slugify identically share one config.
