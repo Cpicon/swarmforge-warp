@@ -418,6 +418,109 @@ else
   fail "--skip-fetch did not download the upstream pack" "./swarm appeared unexpectedly"
 fi
 
+# ------------------------------------------- the installer: the fetching path
+#
+# `--skip-fetch` never reaches fetch_pack, so everything the pack copy does to a
+# project was previously untested. Rather than hit the network, put a stub
+# `curl` at the front of PATH: install.sh only ever calls `curl -fsSL <url> -o
+# <dest>`, so serving two locally built archives exercises the real fetch_pack
+# and bootstrap_scripts, cp -R included.
+
+section "install.sh pack fetch (stubbed curl, no network)"
+
+FETCH_ROOT="$SANDBOX/fetch"
+mkdir -p "$FETCH_ROOT/src/pack-root/swarmforge/roles" \
+         "$FETCH_ROOT/src/scripts-root/swarmforge/scripts" \
+         "$FETCH_ROOT/src/scripts-root/swarmforge/constitution/articles" \
+         "$FETCH_ROOT/bin"
+
+# A pack archive shaped like the real ones -- note it ships its own .gitignore.
+print -r -- '#!/usr/bin/env bash' >"$FETCH_ROOT/src/pack-root/swarm"
+chmod +x "$FETCH_ROOT/src/pack-root/swarm"
+print -rl -- '.DS_Store' '.env' '.claude/' '.swarmforge/' '.worktrees/' 'swarmforge/scripts/' \
+  >"$FETCH_ROOT/src/pack-root/.gitignore"
+print -r -- 'window coder codex coder' >"$FETCH_ROOT/src/pack-root/swarmforge/swarmforge.conf"
+print -r -- 'be a coder' >"$FETCH_ROOT/src/pack-root/swarmforge/roles/coder.prompt"
+
+print -r -- 'true' >"$FETCH_ROOT/src/scripts-root/swarmforge/scripts/swarmforge.sh"
+print -r -- 'an article' >"$FETCH_ROOT/src/scripts-root/swarmforge/constitution/articles/project.prompt"
+
+# GitHub archives wrap everything in one top-level dir; install.sh strips it.
+tar -czf "$FETCH_ROOT/pack.tar.gz"    -C "$FETCH_ROOT/src" pack-root
+tar -czf "$FETCH_ROOT/scripts.tar.gz" -C "$FETCH_ROOT/src" scripts-root
+
+cat >"$FETCH_ROOT/bin/curl" <<'STUB'
+#!/bin/sh
+# Stub curl for the smoke suite: understands only `-fsSL <url> -o <dest>`.
+url=""; dest=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) dest="$2"; shift ;;
+    -*) : ;;
+    *)  url="$1" ;;
+  esac
+  shift
+done
+case "$url" in
+  *two-pack*|*four-pack*|*six-pack*) src="$STUB_PACK" ;;
+  *)                                 src="$STUB_SCRIPTS" ;;
+esac
+cp "$src" "$dest"
+STUB
+chmod +x "$FETCH_ROOT/bin/curl"
+
+run_install_with_stub() {  # project-dir [extra-args...]
+  local dir="$1"; shift
+  local args=""
+  local a
+  for a in "$@"; do args+=" ${(q)a}"; done
+  STUB_PACK="$FETCH_ROOT/pack.tar.gz" \
+  STUB_SCRIPTS="$FETCH_ROOT/scripts.tar.gz" \
+  PATH="$FETCH_ROOT/bin:$PATH" \
+    sh -c "cd ${(q)dir} && sh ${(q)INSTALLER} --branch six-pack$args" >/dev/null 2>&1
+}
+
+# The stub has to actually work, or every assertion below is vacuous.
+FRESH_PROJECT="$SANDBOX/fetch-fresh"
+mkdir -p "$FRESH_PROJECT"
+assert_status 0 "stubbed fetch installs into a fresh project" \
+  run_install_with_stub "$FRESH_PROJECT"
+assert_file "$FRESH_PROJECT/swarm" "pack's ./swarm is installed"
+assert_file "$FRESH_PROJECT/swarmforge/swarmforge.conf" "pack's swarmforge.conf is installed"
+assert_file "$FRESH_PROJECT/swarmforge/scripts/swarmforge.sh" "scripts archive is bootstrapped"
+assert_file "$FRESH_PROJECT/swarm-warp" "launcher is installed on the fetching path too"
+
+# A project with no .gitignore should simply receive the pack's.
+assert_contains "$(cat "$FRESH_PROJECT/.gitignore")" ".swarmforge/" \
+  "a project without a .gitignore receives the pack's"
+
+# ...but a project that already has one must keep it. This is the regression:
+# `cp -R "$TMP_DIR/pack/." "$PROJECT_DIR/"` used to overwrite it wholesale,
+# silently un-ignoring everything the project depended on.
+KEEP_PROJECT="$SANDBOX/fetch-existing-gitignore"
+mkdir -p "$KEEP_PROJECT"
+print -rl -- '# project ignores' 'node_modules/' '*.tfvars' '.terraform/' '.env' \
+  >"$KEEP_PROJECT/.gitignore"
+
+run_install_with_stub "$KEEP_PROJECT"
+KEEP_GI="$(cat "$KEEP_PROJECT/.gitignore")"
+
+assert_contains "$KEEP_GI" "node_modules/"  "existing .gitignore keeps its own entries"
+assert_contains "$KEEP_GI" "*.tfvars"       "existing .gitignore keeps every one of its entries"
+assert_contains "$KEEP_GI" ".terraform/"    "existing .gitignore keeps entries the pack lacks"
+assert_contains "$KEEP_GI" "# project ignores" "existing .gitignore keeps its comments"
+assert_contains "$KEEP_GI" ".swarmforge/"   "the pack's entries are merged in"
+assert_contains "$KEEP_GI" "swarmforge/scripts/" "the pack's remaining entries are merged in"
+assert_eq "1" "$(print -r -- "$KEEP_GI" | grep -cxF '.env')" \
+  "an entry present in both files is not duplicated"
+
+# Re-running must not append the same block again.
+run_install_with_stub "$KEEP_PROJECT"
+assert_eq "1" "$(cat "$KEEP_PROJECT/.gitignore" | grep -cxF '.swarmforge/')" \
+  "re-installing does not duplicate the merged entries"
+assert_eq "1" "$(cat "$KEEP_PROJECT/.gitignore" | grep -cxF 'node_modules/')" \
+  "re-installing does not duplicate the project's entries"
+
 section "bin/swarm-warp"
 assert_contains "$(cat "$LAUNCHER")" "SWARMFORGE_TERMINAL=warp" "launcher pins SWARMFORGE_TERMINAL=warp"
 assert_contains "$(cat "$LAUNCHER")" './swarm' "launcher delegates to ./swarm"

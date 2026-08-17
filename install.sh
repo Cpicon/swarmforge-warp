@@ -112,6 +112,27 @@ need_curl() {
 
 # ---------------------------------------------------------- upstream fetching
 
+# Append to $2 every non-comment entry of $1 that $2 does not already contain.
+# `if grep` rather than `grep && continue` because `set -e` is on and a bare
+# failing grep in an && list is not reliably exempt across shells.
+merge_gitignore() {  # pack-gitignore project-gitignore
+  pack="$1"
+  project="$2"
+  [ -f "$pack" ] || return 0
+  added=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "$line" ] || continue
+    case "$line" in '#'*) continue ;; esac
+    if grep -qxF "$line" "$project"; then continue; fi
+    if [ "$added" -eq 0 ]; then
+      printf '\n# SwarmForge (added by swarmforge-warp)\n' >>"$project"
+      added=1
+    fi
+    printf '%s\n' "$line" >>"$project"
+  done <"$pack"
+  [ "$added" -eq 0 ] || say "  merged the pack's ignore rules into your .gitignore"
+}
+
 fetch_pack() {
   url="https://github.com/${UPSTREAM_SLUG}/archive/refs/heads/${PACK_BRANCH}.tar.gz"
   say "Downloading SwarmForge ${PACK_BRANCH} ..."
@@ -121,8 +142,20 @@ fetch_pack() {
   curl -fsSL "$url" -o "$TMP_DIR/pack.tar.gz" || die "could not download $url"
   tar -xzf "$TMP_DIR/pack.tar.gz" -C "$TMP_DIR/pack" --strip-components=1 \
     || die "could not unpack $url"
+
+  # The pack ships its own .gitignore, and `cp -R` would replace the project's
+  # wholesale -- silently un-ignoring everything it covered. Set it aside, let
+  # the copy happen, then put it back with the pack's entries merged in.
+  if [ -f "$PROJECT_DIR/.gitignore" ]; then
+    cp "$PROJECT_DIR/.gitignore" "$TMP_DIR/gitignore.project"
+  fi
   cp -R "$TMP_DIR/pack/." "$PROJECT_DIR/"
   say "  installed ./swarm and swarmforge/ from ${PACK_BRANCH}"
+
+  if [ -f "$TMP_DIR/gitignore.project" ]; then
+    cp "$TMP_DIR/gitignore.project" "$PROJECT_DIR/.gitignore"
+    merge_gitignore "$TMP_DIR/pack/.gitignore" "$PROJECT_DIR/.gitignore"
+  fi
 }
 
 # The pack branches deliberately ship without swarmforge/scripts; ./swarm
