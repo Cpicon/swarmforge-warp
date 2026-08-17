@@ -71,7 +71,7 @@ your-project/
 
 > **Why the installer downloads `swarmforge/scripts` itself.** The pack branches ship without that directory; `./swarm` bootstraps it from the `main` archive on first run — but only when the directory is *absent*. Since installing the adapter creates `swarmforge/scripts/terminal-adapters/`, that check would never fire again and `./swarm` would fail to find `swarmforge.sh`. The installer therefore performs the same bootstrap first. Using `--skip-fetch` on a project that has never run `./swarm` trips this; the installer warns when it detects that.
 
-> **Your `.gitignore` is preserved.** The pack branches ship a `.gitignore` of their own, and the pack is installed with `cp -R`, which would replace an existing one wholesale — silently un-ignoring whatever it covered. The installer sets yours aside across the copy, restores it, and appends only the pack entries it does not already contain, under a `# SwarmForge (added by swarmforge-warp)` header. `git diff .gitignore` after installing should show insertions and no deletions.
+> **Your `.gitignore` is preserved.** The pack branches ship a `.gitignore` of their own, and the pack is installed with `cp -R`, which would replace an existing one wholesale — silently un-ignoring whatever it covered. The installer takes the pack's copy out of the unpacked tree *before* the copy runs, so your file is never a candidate for being overwritten, then appends only the entries it does not already contain under a `# SwarmForge (added by swarmforge-warp)` header. If the copy fails partway, your `.gitignore` is untouched and the installer says so.
 
 ## Usage
 
@@ -133,7 +133,9 @@ Downloading SwarmForge scripts (main) ...
 swarmforge-warp installed in /Users/you/code/ml-platform
 ```
 
-The packs ship their own `.gitignore`. On a project that already has one, the installer keeps yours and appends only the entries it lacks — `git diff .gitignore` should show insertions and no deletions. Check that before going further; anything else means your ignore rules were replaced.
+The packs ship their own `.gitignore`. On a project that already has one, the installer keeps yours and appends only the entries it lacks, under a `# SwarmForge (added by swarmforge-warp)` header. `git diff .gitignore` should show your own entries untouched and the new block appended at the end.
+
+> If your `.gitignore` did not end in a newline, git also reports one deletion — the old last line, re-added with a newline. That is expected and harmless; look for `\ No newline at end of file` in the diff.
 
 ### 2. Point the roles at your agent CLI
 
@@ -156,13 +158,13 @@ Two things that are easy to get wrong here:
 
 ### 3. Dry-run before spending anything
 
-`swarmforge.bb` has test hooks that stop short of starting agents. They create `.swarmforge/` state files and the tab config, but no git worktrees, no branches, no tmux sessions and no agent processes — so this is a genuine dry run:
+`swarmforge.bb` has test hooks that stop short of starting agents. They create `.swarmforge/` state files, an empty `.worktrees/`, and the tab config — but no git worktrees, no branches, no tmux sessions and no agent processes, so this is a genuine dry run:
 
 ```sh
 bb swarmforge/scripts/swarmforge.bb --test-parse "$(pwd)"
 ```
 
-Confirms the conf parses and shows each role's worktree, receive mode and extra args. Then check the exact command an agent will run:
+Confirms the conf parses and shows each role's worktree, receive mode and extra args. Then check the exact command an agent will run — this hook always renders the `coder` role, and it shows a *non-first* role's command; the first role in the conf additionally gets a `swarm-cleanup.sh` trailer that fires when its agent exits:
 
 ```sh
 bb swarmforge/scripts/swarmforge.bb --test-launch-command "$(pwd)" claude "--permission-mode bypassPermissions"
@@ -232,16 +234,23 @@ specifier ─▶ coder ─▶ cleaner ─▶ architect ─▶ hardender ─▶ Q
 | `specifier` | Gherkin specs and end-to-end QA procedures. **Your entry point.** | `coder`, after your approval |
 | `coder` | TDD implementation of the approved slice: failing unit test first, then code | `cleaner` |
 | `cleaner` | Behaviour-preserving cleanup — names, duplication, local coupling, coverage | `architect` |
-| `architect` | Module boundaries and dependency direction; no behaviour change | `hardender` |
+| `architect` | Module boundaries, dependency direction, property-test coverage; no behaviour change | `hardender` |
 | `hardender` | Mutation testing — finds surviving mutants and kills them | `QA` |
-| `QA` | Turns the specifier's QA procedures into executable scripts, verifies through the UI only | back to `specifier` |
+| `QA` | Turns the specifier's QA procedures into executable scripts; runs the end-to-end suite through the UI only, plus unit, property and acceptance tests | all five roles |
+
+`QA` is the exception to the single-arrow diagram: it broadcasts completion to all five other roles, which merge the result without forwarding it further. Only that terminal broadcast is merge-only.
 
 **You do not normally type into panes 2–6.** They coordinate through handoff files, not through you: an agent commits, writes a small draft, and runs `swarm_handoff.sh`, which queues it; a daemon copies it to the recipient's inbox and sends a wake-up; the recipient runs `ready_for_next.sh`, merges the named commit, does its job, and runs `done_with_current.sh`.
 
-Two reasons to read those panes anyway:
+Read those panes anyway, because **an agent that gets stuck stops and asks** and will sit there until you answer *in that pane*. If the pipeline goes quiet, that is the first thing to check.
 
-- **An agent that gets stuck stops and asks.** Every role is told to "stop and ask for clarification" when it hits ambiguity or a contradiction between tests and spec. It will sit there until you answer *in that pane*. If the pipeline goes quiet, this is the first thing to check.
-- **Commits carry a `By <role>.` byline**, so `git log` in a worktree tells you which stage produced what.
+> **A packaging gap worth knowing about.** Upstream ships shared constitution articles — the handoff rules, the "stop and ask when blocked" rule that applies to *every* role, and a `By <role>.` commit byline convention. In a pack install those land in `swarmforge/scripts/shared-articles/`, and **nothing references that path**: `constitution.prompt` points agents only at `swarmforge/constitution/articles/`, which holds just the three pack-local files. So by default only `QA` is explicitly told to stop and ask (and only about Gherkin conflicts), and no role is told to add the byline. To opt in:
+>
+> ```sh
+> cp -n swarmforge/scripts/shared-articles/*.prompt swarmforge/constitution/articles/
+> ```
+>
+> This is upstream's packaging, not something this overlay changes. Verified against swarm-forge `main` and `six-pack`; if upstream fixes it, the copy becomes a no-op.
 
 If you are coming from single-agent Claude Code, the differences that matter:
 
@@ -255,17 +264,11 @@ If you are coming from single-agent Claude Code, the differences that matter:
 
 ### 7. Stopping it, and recovering a closed pane
 
-**Closing a Warp pane does not stop that agent.** The pane runs `exec tmux attach-session`, so closing it only detaches; the tmux session and the agent keep running. Upstream's docs say closing the first window shuts the swarm down and that a watchdog reopens the others — neither applies here, because this adapter reports `terminal_backend_tracks_windows` = false and SwarmForge therefore skips the watchdog entirely.
+**Closing a Warp pane does not stop that agent.** The pane runs `exec tmux attach-session`, so closing it only detaches; the tmux session and the agent keep running. Upstream's docs say closing the first window shuts the swarm down and that a watchdog reopens the others — neither applies here, because this adapter reports `terminal_backend_tracks_windows` = false and SwarmForge therefore skips the watchdog, which is what implements both behaviours.
 
-To re-attach a pane you closed, open a Warp pane and run:
+**To stop the swarm, quit the agent in the first pane** — `/exit` in the `specifier`'s Claude session, or whatever your agent CLI uses. SwarmForge appends a cleanup trailer to the *first* role's launch command, so when that agent exits it runs `swarm-cleanup.sh` and tears down every session and the handoff daemon. That is command-driven rather than window-driven, so it works normally under Warp.
 
-```sh
-exec tmux -S "$(cat .swarmforge/tmux-socket)" attach-session -t swarmforge-coder
-```
-
-Or just re-open the whole tab from the sidebar `+` menu — the config is still there.
-
-To actually stop the swarm, kill the sessions and the handoff daemon:
+If that pane is already gone, run the cleanup yourself from the project root:
 
 ```sh
 SWARMFORGE_TERMINAL_BACKEND=warp swarmforge/scripts/swarm-cleanup.sh \
@@ -274,6 +277,14 @@ SWARMFORGE_TERMINAL_BACKEND=warp swarmforge/scripts/swarm-cleanup.sh \
 ```
 
 > Upstream documents a `./close-swarm` wrapper for this, but it lives on swarm-forge's `main` branch and is **not** part of a pack, so a project installed this way does not have one. The command above is what `close-swarm` ends up calling.
+
+To re-attach one pane you closed, open a Warp pane, `cd` to the project root and run:
+
+```sh
+exec tmux -S "$(cat .swarmforge/tmux-socket)" attach-session -t swarmforge-coder
+```
+
+Re-opening the whole tab from the sidebar `+` works too, but only do that if you closed the *whole* tab: it spawns all six panes, and any session still attached elsewhere gains a second client, after which tmux sizes the window to the smallest attached client.
 
 ### Backing it out
 
@@ -363,7 +374,7 @@ Set `SWARMFORGE_WARP_TAB_CONFIG_DIR` to write somewhere other than `~/.warp/tab_
 ## Limitations
 
 - **Opening the tab takes one click.** There is no supported way to make Warp open a tab config from a script; the sidebar `+` menu is the entry point. (Warp documents a `warp://tab_config/<name>` URI, but URI-scheme automation was found not to work in current Warp Stable during this integration's testing, so nothing here depends on it.)
-- **No window watchdog.** SwarmForge normally polls whether an agent's window was closed and reopens it. Warp has no pane query API, so that feature is off. Closing a pane tells SwarmForge nothing, nothing reopens it, and the agent keeps running detached — re-attach with `exec tmux -S "$(cat .swarmforge/tmux-socket)" attach-session -t swarmforge-<role>`, or re-open the tab from the sidebar. Shutting down is a deliberate command, not a window close: see [Stopping it](#7-stopping-it-and-recovering-a-closed-pane).
+- **No window watchdog.** SwarmForge normally polls whether an agent's window was closed and reopens it. Warp has no pane query API, so that feature is off. Closing a pane tells SwarmForge nothing, nothing reopens it, and the agent keeps running detached — re-attach from the project root with `exec tmux -S "$(cat .swarmforge/tmux-socket)" attach-session -t swarmforge-<role>`. Shutdown is unaffected: it hangs off the first role's launch command, not off any window. See [Stopping it](#7-stopping-it-and-recovering-a-closed-pane).
 - **No AppleScript.** Warp ships no AppleScript dictionary, so the `osascript` tricks the iTerm2/Ghostty/Terminal.app adapters use are unavailable.
 - **macOS only**, and only tested against Warp Stable.
 - **A tab config per project directory.** The filename is derived from the project's basename (lowercased, non-alphanumerics → `_`), so two projects whose basenames slugify identically share one config.
