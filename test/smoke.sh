@@ -437,8 +437,8 @@ mkdir -p "$FETCH_ROOT/src/pack-root/swarmforge/roles" \
 # A pack archive shaped like the real ones -- note it ships its own .gitignore.
 print -r -- '#!/usr/bin/env bash' >"$FETCH_ROOT/src/pack-root/swarm"
 chmod +x "$FETCH_ROOT/src/pack-root/swarm"
-print -rl -- '.DS_Store' '.env' '.claude/' '.swarmforge/' '.worktrees/' 'swarmforge/scripts/' \
-  >"$FETCH_ROOT/src/pack-root/.gitignore"
+print -rl -- '# pack comment' '.DS_Store' '.env' '.claude/' '.swarmforge/' '.worktrees/' \
+  'swarmforge/scripts/' >"$FETCH_ROOT/src/pack-root/.gitignore"
 print -r -- 'window coder codex coder' >"$FETCH_ROOT/src/pack-root/swarmforge/swarmforge.conf"
 print -r -- 'be a coder' >"$FETCH_ROOT/src/pack-root/swarmforge/roles/coder.prompt"
 
@@ -452,6 +452,12 @@ tar -czf "$FETCH_ROOT/scripts.tar.gz" -C "$FETCH_ROOT/src" scripts-root
 cat >"$FETCH_ROOT/bin/curl" <<'STUB'
 #!/bin/sh
 # Stub curl for the smoke suite: understands only `-fsSL <url> -o <dest>`.
+#
+# Every URL must be routed explicitly. An earlier version fell through to the
+# scripts archive for anything unrecognised, which quietly served a tarball for
+# the raw.githubusercontent URLs `provide()` uses on the piped-install path --
+# the installer then chmod +x'd a gzip blob as the launcher and the adapter and
+# exited 0, with the suite reporting all green.
 url=""; dest=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -462,13 +468,19 @@ while [ $# -gt 0 ]; do
   shift
 done
 case "$url" in
-  *two-pack*|*four-pack*|*six-pack*) src="$STUB_PACK" ;;
-  *)                                 src="$STUB_SCRIPTS" ;;
+  *two-pack.tar.gz|*four-pack.tar.gz|*six-pack.tar.gz) src="$STUB_PACK" ;;
+  *main.tar.gz)                                        src="$STUB_SCRIPTS" ;;
+  */adapter/warp.sh)                                   src="$STUB_ADAPTER" ;;
+  */bin/swarm-warp)                                    src="$STUB_LAUNCHER" ;;
+  *) echo "stub curl: unrouted url: $url" >&2; exit 99 ;;
 esac
-cp "$src" "$dest"
+printf '%s\n' "$url" >>"${STUB_CALL_LOG:-/dev/null}"
+cp "$src" "$dest" || exit 1
 STUB
 chmod +x "$FETCH_ROOT/bin/curl"
 
+# stderr is kept in $LAST_ERR rather than discarded, so a failing install can be
+# explained instead of just reddening an unrelated assertion further down.
 run_install_with_stub() {  # project-dir [extra-args...]
   local dir="$1"; shift
   local args=""
@@ -476,8 +488,26 @@ run_install_with_stub() {  # project-dir [extra-args...]
   for a in "$@"; do args+=" ${(q)a}"; done
   STUB_PACK="$FETCH_ROOT/pack.tar.gz" \
   STUB_SCRIPTS="$FETCH_ROOT/scripts.tar.gz" \
+  STUB_ADAPTER="$ADAPTER" \
+  STUB_LAUNCHER="$LAUNCHER" \
+  STUB_CALL_LOG="${STUB_CALL_LOG:-/dev/null}" \
   PATH="$FETCH_ROOT/bin:$PATH" \
-    sh -c "cd ${(q)dir} && sh ${(q)INSTALLER} --branch six-pack$args" >/dev/null 2>&1
+    sh -c "cd ${(q)dir} && sh ${(q)INSTALLER} --branch six-pack$args" >/dev/null 2>"$LAST_ERR"
+}
+
+# The documented primary install is `curl ... | sh -s -- --branch <pack>`, where
+# $0 is not a readable file, so install.sh's SELF_DIR is empty and provide()
+# fetches the two overlay files over the network instead of copying them from a
+# clone. Feeding the script on stdin reproduces exactly that.
+run_piped_install_with_stub() {  # project-dir
+  local dir="$1"
+  STUB_PACK="$FETCH_ROOT/pack.tar.gz" \
+  STUB_SCRIPTS="$FETCH_ROOT/scripts.tar.gz" \
+  STUB_ADAPTER="$ADAPTER" \
+  STUB_LAUNCHER="$LAUNCHER" \
+  STUB_CALL_LOG="${STUB_CALL_LOG:-/dev/null}" \
+  PATH="$FETCH_ROOT/bin:$PATH" \
+    sh -c "cd ${(q)dir} && sh -s -- --branch six-pack <${(q)INSTALLER}" >/dev/null 2>"$LAST_ERR"
 }
 
 # The stub has to actually work, or every assertion below is vacuous.
@@ -514,12 +544,128 @@ assert_contains "$KEEP_GI" "swarmforge/scripts/" "the pack's remaining entries a
 assert_eq "1" "$(print -r -- "$KEEP_GI" | grep -cxF '.env')" \
   "an entry present in both files is not duplicated"
 
-# Re-running must not append the same block again.
-run_install_with_stub "$KEEP_PROJECT"
-assert_eq "1" "$(cat "$KEEP_PROJECT/.gitignore" | grep -cxF '.swarmforge/')" \
+# Shape, not just membership. Without these, a merge that appended the pack
+# block *before* the project's entries, or dropped the header, or emitted it
+# twice, passed every assertion above.
+GI_HEADER='# SwarmForge (added by swarmforge-warp)'
+assert_eq "1" "$(grep -cxF "$GI_HEADER" "$KEEP_PROJECT/.gitignore")" \
+  "the SwarmForge header appears exactly once"
+assert_status 0 "the project's own entries come before the SwarmForge block" \
+  awk -v h="$GI_HEADER" '$0==h{hn=NR} $0=="node_modules/"{pn=NR} END{exit !(pn>0 && hn>pn)}' \
+  "$KEEP_PROJECT/.gitignore"
+assert_status 0 "the pack's entries come after the header" \
+  awk -v h="$GI_HEADER" '$0==h{hn=NR} $0==".swarmforge/"{sn=NR} END{exit !(hn>0 && sn>hn)}' \
+  "$KEEP_PROJECT/.gitignore"
+assert_eq "0" "$(grep -cxF '# pack comment' "$KEEP_PROJECT/.gitignore")" \
+  "comments in the pack's .gitignore are not merged"
+
+# Re-running the installer as-is must leave the file alone. This pins installer
+# idempotence, NOT merge idempotence: ./swarm now exists, so install.sh:191
+# short-circuits and fetch_pack never runs again. The real re-entry is below.
+assert_status 0 "re-installing exits cleanly" run_install_with_stub "$KEEP_PROJECT"
+assert_eq "1" "$(grep -cxF '.swarmforge/' "$KEEP_PROJECT/.gitignore")" \
   "re-installing does not duplicate the merged entries"
-assert_eq "1" "$(cat "$KEEP_PROJECT/.gitignore" | grep -cxF 'node_modules/')" \
+assert_eq "1" "$(grep -cxF 'node_modules/' "$KEEP_PROJECT/.gitignore")" \
   "re-installing does not duplicate the project's entries"
+
+# Remove ./swarm so the guard reopens and fetch_pack -- hence merge_gitignore --
+# genuinely runs a second time against an already-merged file.
+IDEM="$SANDBOX/fetch-idempotent"
+mkdir -p "$IDEM"
+print -rl -- '# project ignores' 'node_modules/' '.env' >"$IDEM/.gitignore"
+run_install_with_stub "$IDEM"
+IDEM_BEFORE="$(cat "$IDEM/.gitignore")"
+rm -f "$IDEM/swarm"
+assert_status 0 "a second real fetch_pack run succeeds" run_install_with_stub "$IDEM"
+assert_eq "$IDEM_BEFORE" "$(cat "$IDEM/.gitignore")" \
+  "a second real merge_gitignore leaves .gitignore byte-identical"
+
+# --------------------------------------------------- merge edge cases
+
+# `grep -qxF` must match whole lines: a project ignoring .env.local must still
+# receive the pack's .env, or a secrets file silently stops being ignored.
+SUBSTR="$SANDBOX/fetch-substring"
+mkdir -p "$SUBSTR"
+print -rl -- '.env.local' '.envrc' 'node_modules/' >"$SUBSTR/.gitignore"
+run_install_with_stub "$SUBSTR"
+assert_eq "1" "$(grep -cxF '.env' "$SUBSTR/.gitignore")" \
+  "an entry is added even when an existing entry contains it as a substring"
+
+# Appending to a file whose last line has no newline must not fuse the two.
+NONL="$SANDBOX/fetch-no-trailing-newline"
+mkdir -p "$NONL"
+printf 'node_modules/\n.terraform/' >"$NONL/.gitignore"
+run_install_with_stub "$NONL"
+assert_eq "1" "$(grep -cxF '.terraform/' "$NONL/.gitignore")" \
+  "a project .gitignore with no trailing newline keeps its last entry intact"
+assert_eq "1" "$(grep -cxF "$GI_HEADER" "$NONL/.gitignore")" \
+  "the header is not fused onto the last line of a file with no trailing newline"
+
+# A pack entry beginning with `-` must not be parsed as a grep option: doing so
+# consumed the file operand and made grep read the loop's stdin -- the pack --
+# silently dropping every remaining entry.
+DASH="$SANDBOX/fetch-dash-entry"
+mkdir -p "$DASH"
+print -rl -- 'node_modules/' >"$DASH/.gitignore"
+DASH_PACK_SRC="$FETCH_ROOT/src-dash/pack-root"
+mkdir -p "$DASH_PACK_SRC/swarmforge/roles"
+print -r -- '#!/usr/bin/env bash' >"$DASH_PACK_SRC/swarm"
+# `-e` is the dangerous shape: grep takes the next argument as its pattern,
+# leaving no file operand, so it reads the loop's stdin -- the pack itself.
+print -rl -- '-e' '.swarmforge/' 'after-dash/' >"$DASH_PACK_SRC/.gitignore"
+print -r -- 'window coder codex coder' >"$DASH_PACK_SRC/swarmforge/swarmforge.conf"
+print -r -- 'be a coder' >"$DASH_PACK_SRC/swarmforge/roles/coder.prompt"
+tar -czf "$FETCH_ROOT/pack-dash.tar.gz" -C "$FETCH_ROOT/src-dash" pack-root
+STUB_PACK="$FETCH_ROOT/pack-dash.tar.gz" STUB_SCRIPTS="$FETCH_ROOT/scripts.tar.gz" \
+STUB_ADAPTER="$ADAPTER" STUB_LAUNCHER="$LAUNCHER" PATH="$FETCH_ROOT/bin:$PATH" \
+  sh -c "cd ${(q)DASH} && sh ${(q)INSTALLER} --branch six-pack" >/dev/null 2>"$LAST_ERR"
+assert_eq "1" "$(grep -cxF 'after-dash/' "$DASH/.gitignore")" \
+  "a pack entry after one starting with a dash is still merged"
+
+# ------------------------------------------- the copy must never risk the file
+
+# When `cp -R` fails partway it has already traversed part of the project. The
+# project's .gitignore must not be among the casualties: an earlier version
+# backed it up into \$TMP_DIR, which the EXIT trap deletes on the way out.
+CPFAIL="$SANDBOX/fetch-cp-failure"
+mkdir -p "$CPFAIL/swarmforge/roles"
+print -rl -- '# PRECIOUS' 'node_modules/' 'SECRETS.env' >"$CPFAIL/.gitignore"
+print -r -- 'do not overwrite me' >"$CPFAIL/swarmforge/roles/coder.prompt"
+chmod 444 "$CPFAIL/swarmforge/roles/coder.prompt"
+CPFAIL_BEFORE="$(cat "$CPFAIL/.gitignore")"
+assert_status 1 "an install that cannot copy the pack fails loudly" \
+  run_install_with_stub "$CPFAIL"
+assert_eq "$CPFAIL_BEFORE" "$(cat "$CPFAIL/.gitignore")" \
+  "a failed pack copy leaves the project's .gitignore untouched"
+assert_contains "$(cat "$LAST_ERR")" ".gitignore" \
+  "the copy failure tells the user their .gitignore was not modified"
+chmod 644 "$CPFAIL/swarmforge/roles/coder.prompt"
+
+# ------------------------------------ the fetching path installs the real files
+
+assert_file "$FRESH_PROJECT/swarmforge/scripts/terminal-adapters/warp.sh" \
+  "adapter is installed on the fetching path"
+assert_eq "$(checksum "$ADAPTER")" \
+  "$(checksum "$FRESH_PROJECT/swarmforge/scripts/terminal-adapters/warp.sh")" \
+  "installed adapter matches the repo copy on the fetching path"
+assert_eq "$(checksum "$LAUNCHER")" "$(checksum "$FRESH_PROJECT/swarm-warp")" \
+  "installed launcher matches the repo copy on the fetching path"
+
+# The piped install (`curl ... | sh -s --`) is the README's primary instruction
+# and takes provide()'s network branch, which no test previously covered.
+PIPED="$SANDBOX/fetch-piped"
+mkdir -p "$PIPED"
+STUB_CALL_LOG="$SANDBOX/piped-curl-calls.txt"
+: >"$STUB_CALL_LOG"
+assert_status 0 "the piped install succeeds" run_piped_install_with_stub "$PIPED"
+assert_eq "$(checksum "$ADAPTER")" \
+  "$(checksum "$PIPED/swarmforge/scripts/terminal-adapters/warp.sh")" \
+  "piped install fetches the real adapter, not whatever the URL happened to serve"
+assert_eq "$(checksum "$LAUNCHER")" "$(checksum "$PIPED/swarm-warp")" \
+  "piped install fetches the real launcher"
+assert_contains "$(cat "$STUB_CALL_LOG")" "/adapter/warp.sh" \
+  "the piped install really did take provide()'s network branch"
+STUB_CALL_LOG=""
 
 section "bin/swarm-warp"
 assert_contains "$(cat "$LAUNCHER")" "SWARMFORGE_TERMINAL=warp" "launcher pins SWARMFORGE_TERMINAL=warp"

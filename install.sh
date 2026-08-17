@@ -113,24 +113,58 @@ need_curl() {
 # ---------------------------------------------------------- upstream fetching
 
 # Append to $2 every non-comment entry of $1 that $2 does not already contain.
-# `if grep` rather than `grep && continue` because `set -e` is on and a bare
-# failing grep in an && list is not reliably exempt across shells.
+#
+# The result is staged beside the destination and moved into place in one step,
+# matching provide() below, so an interrupted merge cannot leave a half-written
+# .gitignore. The staging file must be a sibling of the destination: $TMP_DIR is
+# usually on another filesystem, where `mv` degrades to a non-atomic copy.
+#
+# Variables carry an _mg_ prefix because POSIX sh has no `local` and everything
+# here is global.
 merge_gitignore() {  # pack-gitignore project-gitignore
-  pack="$1"
-  project="$2"
-  [ -f "$pack" ] || return 0
-  added=0
-  while IFS= read -r line || [ -n "$line" ]; do
-    [ -n "$line" ] || continue
-    case "$line" in '#'*) continue ;; esac
-    if grep -qxF "$line" "$project"; then continue; fi
-    if [ "$added" -eq 0 ]; then
-      printf '\n# SwarmForge (added by swarmforge-warp)\n' >>"$project"
-      added=1
+  _mg_pack="$1"
+  _mg_project="$2"
+  _mg_tmp="$_mg_project.swarmforge-warp.tmp"
+
+  cat "$_mg_project" >"$_mg_tmp" || die "could not stage $_mg_project"
+
+  _mg_added=0
+  while IFS= read -r _mg_line || [ -n "$_mg_line" ]; do
+    [ -n "$_mg_line" ] || continue
+    case "$_mg_line" in '#'*) continue ;; esac
+
+    # `--` stops an entry beginning with `-` being read as a grep option: `-e`
+    # would swallow the file operand, leaving grep to read this loop's stdin
+    # (the pack) and silently drop every remaining entry. Matching against the
+    # staging file also collapses duplicates within the pack itself.
+    #
+    # `|| _mg_rc=$?` keeps a no-match exempt from errexit while still telling
+    # exit 1 (absent) apart from exit 2 (could not read the file), which `if
+    # grep` would have merged into a single "not found" branch.
+    _mg_rc=0
+    grep -qxF -- "$_mg_line" "$_mg_tmp" </dev/null || _mg_rc=$?
+    case "$_mg_rc" in
+      0) continue ;;
+      1) : ;;
+      *) die "could not read $_mg_project while merging ignore rules (grep exit $_mg_rc)" ;;
+    esac
+
+    if [ "$_mg_added" -eq 0 ]; then
+      # The leading newline is load-bearing: it terminates the project's last
+      # line when that file ends without one, instead of fusing the header onto
+      # it. test/smoke.sh pins this.
+      printf '\n# SwarmForge (added by swarmforge-warp)\n' >>"$_mg_tmp"
+      _mg_added=1
     fi
-    printf '%s\n' "$line" >>"$project"
-  done <"$pack"
-  [ "$added" -eq 0 ] || say "  merged the pack's ignore rules into your .gitignore"
+    printf '%s\n' "$_mg_line" >>"$_mg_tmp"
+  done <"$_mg_pack"
+
+  if [ "$_mg_added" -eq 0 ]; then
+    rm -f "$_mg_tmp"
+    return 0
+  fi
+  mv -f "$_mg_tmp" "$_mg_project" || die "could not update $_mg_project"
+  say "  merged the pack's ignore rules into your .gitignore"
 }
 
 fetch_pack() {
@@ -144,17 +178,33 @@ fetch_pack() {
     || die "could not unpack $url"
 
   # The pack ships its own .gitignore, and `cp -R` would replace the project's
-  # wholesale -- silently un-ignoring everything it covered. Set it aside, let
-  # the copy happen, then put it back with the pack's entries merged in.
-  if [ -f "$PROJECT_DIR/.gitignore" ]; then
-    cp "$PROJECT_DIR/.gitignore" "$TMP_DIR/gitignore.project"
+  # wholesale -- silently un-ignoring everything it covered. Take the pack's
+  # copy out of the tree *before* the copy, so the project's file is never a
+  # candidate for being overwritten in the first place.
+  #
+  # Backing the project's file up and restoring it afterwards is not equivalent:
+  # `cp -R` can clobber it and then fail on a later file (a read-only path,
+  # ENOSPC, Ctrl-C -- likely, given this script is documented as `curl | sh`),
+  # and errexit would then skip the restore while the EXIT trap deletes the only
+  # remaining copy. Never touching it has no such window.
+  if [ -f "$TMP_DIR/pack/.gitignore" ]; then
+    mv "$TMP_DIR/pack/.gitignore" "$TMP_DIR/gitignore.pack" \
+      || die "could not set the ${PACK_BRANCH} pack's .gitignore aside"
   fi
-  cp -R "$TMP_DIR/pack/." "$PROJECT_DIR/"
+
+  cp -R "$TMP_DIR/pack/." "$PROJECT_DIR/" \
+    || die "could not copy the ${PACK_BRANCH} pack into $PROJECT_DIR (your .gitignore was not modified)"
   say "  installed ./swarm and swarmforge/ from ${PACK_BRANCH}"
 
-  if [ -f "$TMP_DIR/gitignore.project" ]; then
-    cp "$TMP_DIR/gitignore.project" "$PROJECT_DIR/.gitignore"
-    merge_gitignore "$TMP_DIR/pack/.gitignore" "$PROJECT_DIR/.gitignore"
+  if [ ! -f "$TMP_DIR/gitignore.pack" ]; then
+    warn "the ${PACK_BRANCH} pack shipped no .gitignore; add .swarmforge/, .worktrees/"
+    warn "and swarmforge/scripts/ to yours by hand, or the swarm's working state"
+    warn "will show up as untracked files in your repository"
+  elif [ -f "$PROJECT_DIR/.gitignore" ]; then
+    merge_gitignore "$TMP_DIR/gitignore.pack" "$PROJECT_DIR/.gitignore"
+  else
+    cp "$TMP_DIR/gitignore.pack" "$PROJECT_DIR/.gitignore" \
+      || die "could not install the ${PACK_BRANCH} pack's .gitignore"
   fi
 }
 
