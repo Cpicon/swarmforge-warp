@@ -71,6 +71,8 @@ your-project/
 
 > **Why the installer downloads `swarmforge/scripts` itself.** The pack branches ship without that directory; `./swarm` bootstraps it from the `main` archive on first run — but only when the directory is *absent*. Since installing the adapter creates `swarmforge/scripts/terminal-adapters/`, that check would never fire again and `./swarm` would fail to find `swarmforge.sh`. The installer therefore performs the same bootstrap first. Using `--skip-fetch` on a project that has never run `./swarm` trips this; the installer warns when it detects that.
 
+> **Your `.gitignore` is preserved.** The pack branches ship a `.gitignore` of their own, and the pack is installed with `cp -R`, which would replace an existing one wholesale — silently un-ignoring whatever it covered. The installer sets yours aside across the copy, restores it, and appends only the pack entries it does not already contain, under a `# SwarmForge (added by swarmforge-warp)` header. `git diff .gitignore` after installing should show insertions and no deletions.
+
 ## Usage
 
 ```sh
@@ -96,6 +98,105 @@ SwarmForge starts the tmux sessions as usual, then the adapter prints something 
 **Click the sidebar `+` and pick the config.** It opens in the current window. Each pane attaches to one agent's tmux session.
 
 To stop, use SwarmForge's own `./close-swarm` (or kill the tmux sessions). The panes close themselves.
+
+## A worked example
+
+Putting a six-agent swarm on an existing repo — `~/code/ml-platform`, a real project with its own history, CI and `.gitignore` — using `claude` as the agent CLI.
+
+### 1. Install
+
+Always from inside the target project, on a branch, since the installer adds tracked files to the repo root:
+
+```sh
+cd ~/code/ml-platform
+git checkout -b chore/swarmforge-warp
+~/code/swarmforge-warp/install.sh --branch six-pack
+```
+
+```
+Downloading SwarmForge six-pack ...
+  installed ./swarm and swarmforge/ from six-pack
+  merged the pack's ignore rules into your .gitignore
+Downloading SwarmForge scripts (main) ...
+  installed swarmforge/scripts
+
+swarmforge-warp installed in /Users/you/code/ml-platform
+```
+
+The packs ship their own `.gitignore`. On a project that already has one, the installer keeps yours and appends only the entries it lacks — `git diff .gitignore` should show insertions and no deletions. Check that before going further; anything else means your ignore rules were replaced.
+
+### 2. Point the roles at your agent CLI
+
+The packs ship configured for `codex`. If you use something else, edit `swarmforge/swarmforge.conf`:
+
+```
+# Format: window <role> <agent> <worktree> [task|batch] [extra-cli-args...]
+window specifier claude master   --permission-mode bypassPermissions
+window coder     claude coder    --permission-mode bypassPermissions
+window cleaner   claude cleaner  batch --permission-mode bypassPermissions
+window architect claude architect batch --permission-mode bypassPermissions
+window hardender claude hardender batch --permission-mode bypassPermissions
+window QA        claude QA       batch --permission-mode bypassPermissions
+```
+
+Two things that are easy to get wrong here:
+
+- **The agent field is an allowlist, not a command.** `swarmforge.bb` accepts only `claude`, `codex`, `copilot` or `grok`, and builds a fixed command template per name. A shell alias — `claudio`, say — is rejected at config-parse time with `Unsupported agent`, even though the command is ultimately delivered by tmux `send-keys` into an interactive shell where the alias *would* have expanded.
+- **Everything after the receive mode is passed through to the CLI.** That is the supported way to get alias-like behaviour. SwarmForge already launches Claude with `--permission-mode acceptEdits`; a trailing `--permission-mode bypassPermissions` is appended after it and wins, which is the same unattended posture as `claude --dangerously-skip-permissions`. Leave it off to keep `acceptEdits`, which still lets agents edit files but prompts for other tools.
+
+### 3. Dry-run before spending anything
+
+`swarmforge.bb` has test hooks that stop short of starting agents. They create `.swarmforge/` state files and the tab config, but no git worktrees, no branches, no tmux sessions and no agent processes — so this is a genuine dry run:
+
+```sh
+bb swarmforge/scripts/swarmforge.bb --test-parse "$(pwd)"
+```
+
+Confirms the conf parses and shows each role's worktree, receive mode and extra args. Then check the exact command an agent will run:
+
+```sh
+bb swarmforge/scripts/swarmforge.bb --test-launch-command "$(pwd)" claude "--permission-mode bypassPermissions"
+```
+
+```
+… claude --append-system-prompt-file '.../coder.md' --permission-mode acceptEdits \
+  -n 'SwarmForge Coder' --permission-mode bypassPermissions "$(cat '.../coder.md')"
+```
+
+Then drive this adapter through SwarmForge's own bridge:
+
+```sh
+bb swarmforge/scripts/swarmforge.bb --test-terminal-bridge "$(pwd)" warp
+```
+
+`warp-tab-config` on stdout means the adapter ran and wrote `~/.warp/tab_configs/swarmforge_ml_platform.toml`. Open it from Warp's sidebar now if you want to see the layout before any agent starts — the panes will just fail to attach, since the tmux sessions do not exist yet.
+
+### 4. Run it
+
+```sh
+./swarm-warp
+```
+
+Then **sidebar `+` → "SwarmForge ml-platform"**. Six panes in one tab, in `sessions.tsv` order:
+
+```
+┌──────────────────────── Warp: SwarmForge ml-platform ───────────────────────┐
+│ specifier          │ cleaner            │ hardender                        │
+│ coder              │ architect          │ QA                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+`specifier` is focused. Each pane is `exec tmux attach-session` against that agent's session, so `./close-swarm` closes all six.
+
+### Backing it out
+
+The install is confined to the branch plus one file outside the repo:
+
+```sh
+git checkout main && git branch -D chore/swarmforge-warp
+git clean -fd swarm swarm-warp swarmforge
+rm -f ~/.warp/tab_configs/swarmforge_ml_platform.toml
+```
 
 ## How it works
 
@@ -195,7 +296,9 @@ SwarmForge itself is untouched — it goes back to its own terminal detection.
 ./test/smoke.sh
 ```
 
-The suite needs no Warp UI, no tmux server and no network. It runs the adapter the way SwarmForge does — a fresh `zsh -c` with `SCRIPT_DIR`/`WORKING_DIR`/`TMUX_SOCKET` set and stdout captured as the window id — against a throwaway `$HOME`, so your real `~/.warp/` is never written to. It covers layouts for 1–6 agents, TOML validity and pane-tree soundness, the no-op paths, escaping of paths containing spaces and quotes, and `install.sh --skip-fetch`.
+The suite needs no Warp UI, no tmux server and no network. It runs the adapter the way SwarmForge does — a fresh `zsh -c` with `SCRIPT_DIR`/`WORKING_DIR`/`TMUX_SOCKET` set and stdout captured as the window id — against a throwaway `$HOME`, so your real `~/.warp/` is never written to. It covers layouts for 1–6 agents, TOML validity and pane-tree soundness, the no-op paths, escaping of paths containing spaces and quotes, and both installer paths.
+
+The fetching path is covered without touching the network by putting a stub `curl` at the front of `PATH`. `install.sh` only ever calls `curl -fsSL <url> -o <dest>`, so serving two locally built archives exercises the real `fetch_pack` and `bootstrap_scripts` — the `cp -R` included, which is what the `.gitignore` preservation tests pin. That keeps the test hooks in the test suite rather than adding injection points to `install.sh`.
 
 Two things worth knowing before editing `adapter/warp.sh`:
 
