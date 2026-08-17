@@ -97,7 +97,17 @@ SwarmForge starts the tmux sessions as usual, then the adapter prints something 
 
 **Click the sidebar `+` and pick the config.** It opens in the current window. Each pane attaches to one agent's tmux session.
 
-To stop, use SwarmForge's own `./close-swarm` (or kill the tmux sessions). The panes close themselves.
+Once it is running, you drive the swarm from the **first** pane — see [A worked example](#a-worked-example) for what to type and what the other panes do.
+
+To stop it, kill the sessions and the handoff daemon:
+
+```sh
+SWARMFORGE_TERMINAL_BACKEND=warp swarmforge/scripts/swarm-cleanup.sh \
+  "$(cat .swarmforge/tmux-socket)" .swarmforge/window-ids \
+  $(cut -f3 .swarmforge/sessions.tsv)
+```
+
+Closing the panes does **not** stop the agents; they run `exec tmux attach-session`, so closing a pane only detaches it.
 
 ## A worked example
 
@@ -186,7 +196,84 @@ Then **sidebar `+` → "SwarmForge ml-platform"**. Six panes in one tab, in `ses
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-`specifier` is focused. Each pane is `exec tmux attach-session` against that agent's session, so `./close-swarm` closes all six.
+Each pane is one agent, attached to its own tmux session, working in its own git worktree under `.worktrees/<role>` on a branch called `swarmforge-<role>`. `specifier` is the exception: it runs in your main checkout, on your current branch.
+
+### 5. Give the swarm its first feature
+
+**You talk to `specifier`. That is the whole interface.** Click that pane and type what you want, exactly as you would prompt a single agent:
+
+```
+Add a /healthz endpoint that returns 200 with {"status":"ok"} and the current
+git SHA, and 503 if the database ping fails.
+```
+
+What happens next, in order:
+
+1. **`specifier` asks you questions.** Its prompt tells it to "ask questions to settle ambiguity" — expect to be asked what counts as a database ping, what the timeout is, and so on. Answer in that pane.
+2. **It writes the specification** — Gherkin feature files plus an end-to-end QA procedure — then **stops and waits for you**. This gate is explicit in its prompt: *"Do not commit or notify coder until the user explicitly approves the handoff."* Nothing reaches the other five agents until you clear it.
+3. **You approve.** It commits the spec, invents a short task name, and sends a `git_handoff` to `coder`.
+4. **The other five panes start moving on their own.** You do not drive this part.
+5. **`QA` finishes and notifies `specifier`**, which merges the work and asks you what feature you want next.
+
+So one full cycle is: *prompt the specifier → answer its questions → approve once → watch → answer "what next?"*.
+
+### 6. What the other five panes are doing
+
+Work moves down a fixed pipeline, each agent handing the next one a **commit**, not a diff or a chat message:
+
+```
+specifier ─▶ coder ─▶ cleaner ─▶ architect ─▶ hardender ─▶ QA ─┐
+    ▲                                                          │
+    └──────────────── merge, then "what next?" ────────────────┘
+```
+
+| Pane | Owns | Hands to |
+|---|---|---|
+| `specifier` | Gherkin specs and end-to-end QA procedures. **Your entry point.** | `coder`, after your approval |
+| `coder` | TDD implementation of the approved slice: failing unit test first, then code | `cleaner` |
+| `cleaner` | Behaviour-preserving cleanup — names, duplication, local coupling, coverage | `architect` |
+| `architect` | Module boundaries and dependency direction; no behaviour change | `hardender` |
+| `hardender` | Mutation testing — finds surviving mutants and kills them | `QA` |
+| `QA` | Turns the specifier's QA procedures into executable scripts, verifies through the UI only | back to `specifier` |
+
+**You do not normally type into panes 2–6.** They coordinate through handoff files, not through you: an agent commits, writes a small draft, and runs `swarm_handoff.sh`, which queues it; a daemon copies it to the recipient's inbox and sends a wake-up; the recipient runs `ready_for_next.sh`, merges the named commit, does its job, and runs `done_with_current.sh`.
+
+Two reasons to read those panes anyway:
+
+- **An agent that gets stuck stops and asks.** Every role is told to "stop and ask for clarification" when it hits ambiguity or a contradiction between tests and spec. It will sit there until you answer *in that pane*. If the pipeline goes quiet, this is the first thing to check.
+- **Commits carry a `By <role>.` byline**, so `git log` in a worktree tells you which stage produced what.
+
+If you are coming from single-agent Claude Code, the differences that matter:
+
+| Single-agent Claude Code | This swarm |
+|---|---|
+| You prompt the agent that does the work | You prompt `specifier`; five others pick up behind it |
+| One working tree | Six worktrees, one branch per role |
+| You review at the end | Each stage reviews the previous stage's commit |
+| You approve tool calls as they come | One human gate: spec → coder. After that it runs unattended |
+| `Ctrl-C` stops it | See below — closing panes does not stop anything |
+
+### 7. Stopping it, and recovering a closed pane
+
+**Closing a Warp pane does not stop that agent.** The pane runs `exec tmux attach-session`, so closing it only detaches; the tmux session and the agent keep running. Upstream's docs say closing the first window shuts the swarm down and that a watchdog reopens the others — neither applies here, because this adapter reports `terminal_backend_tracks_windows` = false and SwarmForge therefore skips the watchdog entirely.
+
+To re-attach a pane you closed, open a Warp pane and run:
+
+```sh
+exec tmux -S "$(cat .swarmforge/tmux-socket)" attach-session -t swarmforge-coder
+```
+
+Or just re-open the whole tab from the sidebar `+` menu — the config is still there.
+
+To actually stop the swarm, kill the sessions and the handoff daemon:
+
+```sh
+SWARMFORGE_TERMINAL_BACKEND=warp swarmforge/scripts/swarm-cleanup.sh \
+  "$(cat .swarmforge/tmux-socket)" .swarmforge/window-ids \
+  $(cut -f3 .swarmforge/sessions.tsv)
+```
+
+> Upstream documents a `./close-swarm` wrapper for this, but it lives on swarm-forge's `main` branch and is **not** part of a pack, so a project installed this way does not have one. The command above is what `close-swarm` ends up calling.
 
 ### Backing it out
 
@@ -195,6 +282,7 @@ The install is confined to the branch plus one file outside the repo:
 ```sh
 git checkout main && git branch -D chore/swarmforge-warp
 git clean -fd swarm swarm-warp swarmforge
+rm -rf .swarmforge .worktrees
 rm -f ~/.warp/tab_configs/swarmforge_ml_platform.toml
 ```
 
@@ -275,7 +363,7 @@ Set `SWARMFORGE_WARP_TAB_CONFIG_DIR` to write somewhere other than `~/.warp/tab_
 ## Limitations
 
 - **Opening the tab takes one click.** There is no supported way to make Warp open a tab config from a script; the sidebar `+` menu is the entry point. (Warp documents a `warp://tab_config/<name>` URI, but URI-scheme automation was found not to work in current Warp Stable during this integration's testing, so nothing here depends on it.)
-- **No window watchdog.** SwarmForge normally polls whether an agent's window was closed and reacts. Warp has no pane query API, so that feature is off. Closing a pane by hand will not tell SwarmForge anything; use `./close-swarm` to shut the swarm down.
+- **No window watchdog.** SwarmForge normally polls whether an agent's window was closed and reopens it. Warp has no pane query API, so that feature is off. Closing a pane tells SwarmForge nothing, nothing reopens it, and the agent keeps running detached — re-attach with `exec tmux -S "$(cat .swarmforge/tmux-socket)" attach-session -t swarmforge-<role>`, or re-open the tab from the sidebar. Shutting down is a deliberate command, not a window close: see [Stopping it](#7-stopping-it-and-recovering-a-closed-pane).
 - **No AppleScript.** Warp ships no AppleScript dictionary, so the `osascript` tricks the iTerm2/Ghostty/Terminal.app adapters use are unavailable.
 - **macOS only**, and only tested against Warp Stable.
 - **A tab config per project directory.** The filename is derived from the project's basename (lowercased, non-alphanumerics → `_`), so two projects whose basenames slugify identically share one config.
