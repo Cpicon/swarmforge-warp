@@ -439,11 +439,30 @@ print -r -- '#!/usr/bin/env bash' >"$FETCH_ROOT/src/pack-root/swarm"
 chmod +x "$FETCH_ROOT/src/pack-root/swarm"
 print -rl -- '# pack comment' '.DS_Store' '.env' '.claude/' '.swarmforge/' '.worktrees/' \
   'swarmforge/scripts/' >"$FETCH_ROOT/src/pack-root/.gitignore"
-print -r -- 'window coder codex coder' >"$FETCH_ROOT/src/pack-root/swarmforge/swarmforge.conf"
-print -r -- 'be a coder' >"$FETCH_ROOT/src/pack-root/swarmforge/roles/coder.prompt"
+# A conf shaped like the real packs: first role parked on `master` (the shared
+# checkout), a batch role, and a comment header to preserve.
+mkdir -p "$FETCH_ROOT/src/pack-root/swarmforge/constitution/articles"
+print -rl -- \
+  '# Format: window <role> <agent> <worktree> [task|batch] [extra-cli-args...]' \
+  'window specifier codex master' \
+  'window coder codex coder' \
+  'window cleaner codex cleaner batch' \
+  >"$FETCH_ROOT/src/pack-root/swarmforge/swarmforge.conf"
+for r in specifier coder cleaner; do
+  print -r -- "be a $r" >"$FETCH_ROOT/src/pack-root/swarmforge/roles/$r.prompt"
+done
+print -r -- 'Read every file in swarmforge/constitution/articles/.' \
+  >"$FETCH_ROOT/src/pack-root/swarmforge/constitution.prompt"
+print -r -- 'pack-local article' \
+  >"$FETCH_ROOT/src/pack-root/swarmforge/constitution/articles/project.prompt"
 
 print -r -- 'true' >"$FETCH_ROOT/src/scripts-root/swarmforge/scripts/swarmforge.sh"
-print -r -- 'an article' >"$FETCH_ROOT/src/scripts-root/swarmforge/constitution/articles/project.prompt"
+# Upstream's shared articles: these land in scripts/shared-articles/, which
+# nothing references until --configure merges them.
+print -r -- 'shared workflow article' \
+  >"$FETCH_ROOT/src/scripts-root/swarmforge/constitution/articles/workflow.prompt"
+print -r -- 'shared handoffs article' \
+  >"$FETCH_ROOT/src/scripts-root/swarmforge/constitution/articles/handoffs.prompt"
 
 # GitHub archives wrap everything in one top-level dir; install.sh strips it.
 tar -czf "$FETCH_ROOT/pack.tar.gz"    -C "$FETCH_ROOT/src" pack-root
@@ -666,6 +685,116 @@ assert_eq "$(checksum "$LAUNCHER")" "$(checksum "$PIPED/swarm-warp")" \
 assert_contains "$(cat "$STUB_CALL_LOG")" "/adapter/warp.sh" \
   "the piped install really did take provide()'s network branch"
 STUB_CALL_LOG=""
+
+# ------------------------------------------------------- install.sh --configure
+#
+# The three fixes every project needed by hand after installing: point the roles
+# at an agent CLI that is actually present, get the first role out of the shared
+# checkout, and make upstream's shared constitution articles reachable.
+
+section "install.sh --configure"
+
+conf_of() { print -r -- "$1/swarmforge/swarmforge.conf" }
+
+# Without --configure nothing about the pack may change.
+PLAIN="$SANDBOX/cfg-plain"
+mkdir -p "$PLAIN"
+run_install_with_stub "$PLAIN"
+PLAIN_CONF="$(cat "$(conf_of "$PLAIN")")"
+assert_contains "$PLAIN_CONF" "window specifier codex master" \
+  "without --configure the pack's conf is untouched"
+assert_status 1 "without --configure shared articles are not merged" \
+  test -f "$PLAIN/swarmforge/constitution/articles/workflow.prompt"
+
+# --agent rewrites every role's agent column.
+AG="$SANDBOX/cfg-agent"
+mkdir -p "$AG"
+run_install_with_stub "$AG" --agent claude
+AG_CONF="$(cat "$(conf_of "$AG")")"
+assert_eq "0" "$(print -r -- "$AG_CONF" | grep -c ' codex ')" \
+  "--agent claude leaves no codex roles"
+assert_eq "3" "$(print -r -- "$AG_CONF" | grep -c '^window .* claude ')" \
+  "--agent claude rewrites every role"
+assert_contains "$AG_CONF" "# Format: window <role>" \
+  "rewriting the conf preserves its comments"
+assert_contains "$AG_CONF" "window cleaner claude cleaner batch" \
+  "rewriting preserves the receive mode"
+
+# The first role must leave the shared checkout, so branch switches in the
+# project root cannot pull the constitution out from under it.
+assert_contains "$AG_CONF" "window specifier claude specifier" \
+  "--configure moves the first role off master into its own worktree"
+assert_eq "0" "$(print -r -- "$AG_CONF" | grep -c ' master')" \
+  "no role is left pointing at the shared checkout"
+
+KEEP="$SANDBOX/cfg-keep-root"
+mkdir -p "$KEEP"
+run_install_with_stub "$KEEP" --agent claude --keep-first-role-in-root
+assert_contains "$(cat "$(conf_of "$KEEP")")" "window specifier claude master" \
+  "--keep-first-role-in-root leaves the first role in the shared checkout"
+
+# `claudio` is not a valid SwarmForge agent -- it is the user's shell alias for
+# `claude --dangerously-skip-permissions`. The installer translates it.
+CLAUDIO="$SANDBOX/cfg-claudio"
+mkdir -p "$CLAUDIO"
+run_install_with_stub "$CLAUDIO" --agent claudio
+CLAUDIO_CONF="$(cat "$(conf_of "$CLAUDIO")")"
+assert_contains "$CLAUDIO_CONF" "window specifier claude specifier --permission-mode bypassPermissions" \
+  "--agent claudio becomes claude plus the permission bypass"
+assert_contains "$CLAUDIO_CONF" "window cleaner claude cleaner batch --permission-mode bypassPermissions" \
+  "--agent claudio keeps the receive mode ahead of the args"
+assert_eq "0" "$(print -r -- "$CLAUDIO_CONF" | grep -c claudio)" \
+  "the literal alias never reaches the conf, which SwarmForge would reject"
+
+BOGUS="$SANDBOX/cfg-bogus"
+mkdir -p "$BOGUS"
+assert_status 1 "an unknown agent is rejected" \
+  run_install_with_stub "$BOGUS" --agent nope
+assert_contains "$(cat "$LAST_ERR")" "claudio" \
+  "the unknown-agent error lists the accepted values"
+
+# Explicit args win over the claudio shorthand.
+ARGS="$SANDBOX/cfg-args"
+mkdir -p "$ARGS"
+run_install_with_stub "$ARGS" --agent claude --agent-args '--permission-mode plan'
+assert_contains "$(cat "$(conf_of "$ARGS")")" "window coder claude coder --permission-mode plan" \
+  "--agent-args sets the trailing CLI args"
+
+# Upstream's shared articles are unreachable where the pack leaves them.
+assert_file "$AG/swarmforge/scripts/shared-articles/workflow.prompt" \
+  "shared articles are still staged where upstream puts them"
+assert_file "$AG/swarmforge/constitution/articles/workflow.prompt" \
+  "--configure makes the shared workflow article reachable"
+assert_file "$AG/swarmforge/constitution/articles/handoffs.prompt" \
+  "--configure makes the shared handoffs article reachable"
+assert_eq "pack-local article" "$(cat "$AG/swarmforge/constitution/articles/project.prompt")" \
+  "a pack-local article of the same name is never overwritten"
+
+NOART="$SANDBOX/cfg-no-articles"
+mkdir -p "$NOART"
+run_install_with_stub "$NOART" --agent claude --no-shared-articles
+assert_status 1 "--no-shared-articles skips the merge" \
+  test -f "$NOART/swarmforge/constitution/articles/workflow.prompt"
+
+# Re-running must converge, not accumulate.
+rm -f "$AG/swarm"
+assert_status 0 "re-configuring succeeds" run_install_with_stub "$AG" --agent claude
+assert_eq "$AG_CONF" "$(cat "$(conf_of "$AG")")" "--configure is idempotent"
+
+# The one genuinely per-project file: scaffolded from what is in the repo, with
+# the parts a human must decide left as explicit TODOs.
+SCAF="$SANDBOX/cfg-scaffold"
+mkdir -p "$SCAF/services/thing"
+print -r -- '[project]' >"$SCAF/pyproject.toml"
+print -r -- 'resource "google_project" "x" {}' >"$SCAF/main.tf"
+run_install_with_stub "$SCAF" --agent claude --scaffold-project-prompt
+SCAF_PROMPT="$(cat "$SCAF/swarmforge/constitution/articles/project.prompt" 2>/dev/null)"
+assert_contains "$SCAF_PROMPT" "Python" "the scaffold detects Python from pyproject.toml"
+assert_contains "$SCAF_PROMPT" "Terraform" "the scaffold detects Terraform from .tf files"
+assert_contains "$SCAF_PROMPT" "claude" "the scaffold records the configured agent"
+assert_contains "$SCAF_PROMPT" "TODO" "the scaffold leaves explicit TODOs rather than guessing"
+assert_eq "0" "$(print -r -- "$SCAF_PROMPT" | grep -ci babashka)" \
+  "the scaffold never claims the pack's own language"
 
 section "bin/swarm-warp"
 assert_contains "$(cat "$LAUNCHER")" "SWARMFORGE_TERMINAL=warp" "launcher pins SWARMFORGE_TERMINAL=warp"

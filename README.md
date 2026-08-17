@@ -54,6 +54,33 @@ The installer is idempotent — re-run it to upgrade.
 | `--upstream-ref <ref>` | `main` | Ref of `unclebob/swarm-forge` used for the archive that provides `swarmforge/scripts` |
 | `--overlay-ref <ref>` | `main` | Ref of this repo to pull `adapter/warp.sh` and `bin/swarm-warp` from when the installer is piped rather than run from a clone. Also settable via `$SWARMFORGE_WARP_REF` |
 | `--skip-fetch` | off | Download nothing from SwarmForge; only install the adapter and launcher into a project that already has them |
+| `--configure` | off | Apply the post-install fixes every project needs — see below. Implied by `--agent`, `--agent-args` and `--scaffold-project-prompt` |
+| `--agent <cli>` | detected | `claude`, `codex`, `copilot`, `grok`, or `claudio` as shorthand for claude with permission checks bypassed. Defaults to the first found on `PATH` |
+| `--agent-args <args>` | — | Extra arguments appended to every role, e.g. `'--permission-mode plan'` |
+| `--keep-first-role-in-root` | off | Leave the first role in your working checkout (not recommended — see below) |
+| `--no-shared-articles` | off | Skip merging upstream's shared constitution articles |
+| `--scaffold-project-prompt` | off | Replace the pack's `project.prompt` with one describing *this* repository |
+
+### `--configure`: the fixes every project needs
+
+The packs are configured for the repository they were authored in. Installed as-is they name an agent CLI you may not have, park the first role in your own working checkout, and leave upstream's shared constitution articles somewhere nothing reads. Those three fixes are identical in every project, so `--configure` does them:
+
+```sh
+cd /any/repo
+/path/to/swarmforge-warp/install.sh --branch six-pack --agent claudio --scaffold-project-prompt
+```
+
+```
+  configured swarmforge.conf for claude
+  made 3 shared constitution article(s) reachable
+  scaffolded swarmforge/constitution/articles/project.prompt (edit the TODOs)
+```
+
+- **Agent** — rewrites every role's agent column, preserving comments, receive modes and field order. `claudio` is not a SwarmForge agent (the parser validates that field against a fixed allowlist and rejects anything else), so the installer translates it to `claude --permission-mode bypassPermissions`, which is what the alias expands to.
+- **First-role worktree** — the packs assign the first role the `master` worktree, one of two names SwarmForge maps to your main checkout rather than `.worktrees/`. That makes the swarm and you share one working tree: switching branches there removes that agent's constitution mid-run with no error, and you cannot work while the swarm works. `--configure` names the worktree after the role instead.
+- **Shared articles** — `constitution.prompt` points agents at `swarmforge/constitution/articles/`, but a pack install leaves upstream's shared articles (the handoff protocol, the "stop and ask when blocked" rule, the commit byline) in `swarmforge/scripts/shared-articles/`, which nothing references. They are copied across; a pack-local article of the same name is never overwritten, since upstream treats those as deliberate overrides.
+
+**One thing stays manual, and should.** `swarmforge/constitution/articles/project.prompt` tells every agent what your project *is* — language, layout, test command, and what they must never run. The packs ship one describing their own repository (it says the project language is Babashka), and agents read it as fact. `--scaffold-project-prompt` writes one from what it can detect and leaves the rest as explicit `TODO`s rather than guessing, because a confidently wrong constitution is worse than an obviously incomplete one.
 
 ### What it puts where
 
